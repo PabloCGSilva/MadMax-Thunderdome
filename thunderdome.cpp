@@ -31,8 +31,9 @@
 //     is active with its meter full, the level is set to 10 (buffed difficulty 1.0); the
 //     game's value goes back when the War Crier switches off (cage empty, or the arena
 //     unloads). The game's script writes the level again every ~11 s (test 2026-11-03):
-//     while raised, those writes to the player's blackboard store 10 instead (the game's
-//     value is kept for the restore); a write to another blackboard ends the raise.
+//     while raised, those writes of the same level to the player's blackboard store 10
+//     instead. Any other write (another level: fast travel out of the cage; another
+//     blackboard) is kept and ends the raise until the War Crier switches off.
 //
 // Depends on MinHook only; every game address is found at startup by byte
 // signature (generated from the GOG 2015-12-07 build by tools/gen_sigs.py).
@@ -46,7 +47,7 @@
 #include <cstdarg>
 #include "MinHook.h"
 
-#define TD_VERSION "0.9.1-wc3"
+#define TD_VERSION "0.9.1-wc4"
 
 // ---------------------------------------------------------------- logging --
 static char g_modDir[MAX_PATH] = "";
@@ -298,6 +299,7 @@ static SetBbFloatFn SetBbFloat_orig = nullptr;
 static InActivateFn InActivate_orig = nullptr;
 static void** g_charManager = nullptr;
 static volatile float g_gameLevel = -1.0f;     // the last level the game wrote (-1: none seen yet)
+static float g_raisedFrom = -1.0f;              // the game's level when it was raised
 static uint8_t* volatile g_raisedFor = nullptr;  // the character whose blackboard holds ARENA_LEVEL, or null
 static volatile DWORD g_ownWrite = 0;           // thread id while this plugin writes the level
 static int g_raises = 0, g_restores = 0, g_replaced = 0, g_levelLines = 0;
@@ -350,6 +352,7 @@ static void ArenaLevelUpdate(uint8_t* b) {
     }
     uint8_t* ch = PlayerCharacter();
     if (!ch) return;
+    g_raisedFrom = g_gameLevel;
     bool ok = WriteLevel(ch, ARENA_LEVEL);
     g_raisedFor = ch;
     g_raises++;
@@ -360,13 +363,15 @@ static bool SetBbFloat_hook(void* bb, unsigned key, float v, int persistence) {
     if (key == BB_LOC_DIFF && g_ownWrite != GetCurrentThreadId()) {
         g_gameLevel = v;
         uint8_t* ch = g_raisedFor;
-        if (ch && ch != (uint8_t*)1 && bb == ch + 0xD90) {
+        if (ch && ch != (uint8_t*)1 && bb == ch + 0xD90 && v == g_raisedFrom) {
             if (++g_replaced == 1 && ++g_levelLines <= 200)
                 LogLine("arena level: the game wrote location difficulty %.0f, stored %.0f instead (the next ones are counted at session end)", v, ARENA_LEVEL);
             v = ARENA_LEVEL;
-        } else if (ch) {
-            g_raisedFor = nullptr;               // another blackboard: the game's value wins; the War Crier raises it again on its next update
-            if (++g_levelLines <= 200) LogLine("arena level: the game set location difficulty %.0f on another blackboard, kept", v);
+        } else if (ch && ch != (uint8_t*)1) {
+            g_raisedFor = (uint8_t*)1;           // the game's value wins; no new raise until the War Crier switches off
+            if (++g_levelLines <= 200)
+                LogLine("arena level: the game set location difficulty %.0f (%s), kept; raised again after the War Crier switches off", v,
+                    bb == ch + 0xD90 ? "another level" : "another blackboard");
         }
     }
     return SetBbFloat_orig(bb, key, v, persistence);
