@@ -3,7 +3,8 @@
 // The mod itself is data (dropzone files: the arena, its waves, the crowd, the
 // Tenderloin finale, the map icon and the fast-travel point). Two things the
 // data cannot do are done here; until this plugin existed they lived in the
-// diagnostic ThunderdomeProbe, so this is exactly what the tests ran with:
+// diagnostic ThunderdomeProbe, so this is exactly what the tests ran with
+// (3, the War Crier, also came from a probe test):
 //
 //  1. Character resources for the gate waves. The arena's gate enemies are
 //     Roadkill defenders and gimps; the game only loads a faction's resource
@@ -15,6 +16,21 @@
 //     a save made while the arena's point was off would turn it off again.
 //     After every CMissionManager::Load the arena's point (0x37601FEE) is
 //     switched on with CMissionManager::SetRestartPointEnable.
+//  3. The War Crier buff. The arena holds a camp War Crier (CPerimeterWarcryerObject
+//     'td_warcryer'): with enemies and the player in its shape it fills its meter and
+//     the game sets "camp_bell_buff_active" on the player (enemies buffed). The arena's
+//     location counts as a completed camp, so the object switched itself off on its
+//     first update (probe test 2026-11-02). Before each of its updates the location
+//     index is set to 0xFFFF (the completed-camp check is skipped), the object is kept
+//     active, and the flag CPerimeterHandlerSystem::Activate needs, which InActivate
+//     clears, is set again so it can come back after the cage empties.
+//  4. The War Crier's strength. The enemies' difficulty comes from the location level
+//     on the player's blackboard ("current_location_difficulty", 1 in the arena): the
+//     level picks a range (1: 0.0-0.4, 7 and up: max 0.85-1.0) and the buff adds 0.3 to
+//     its maximum, so in the arena the buff only reached 0.7. While the arena War Crier
+//     is active with its meter full, the level is set to 10 (buffed difficulty 1.0); the
+//     game's value goes back when the War Crier switches off (cage empty, or the arena
+//     unloads) and any value the game writes itself is kept (probe test 2026-11-03).
 //
 // Depends on MinHook only; every game address is found at startup by byte
 // signature (generated from the GOG 2015-12-07 build by tools/gen_sigs.py).
@@ -28,7 +44,7 @@
 #include <cstdarg>
 #include "MinHook.h"
 
-#define TD_VERSION "0.9.0-beta1"
+#define TD_VERSION "0.9.1-wc2"
 
 // ---------------------------------------------------------------- logging --
 static char g_modDir[MAX_PATH] = "";
@@ -79,8 +95,13 @@ static GameSignature g_sigs[] = {
     { "CSpawnedEntityHandler::GetResourceSetSpawnTypeId", "48 89 5C 24 08 41 8B D8 4C 63 DA 4C 8B D1 41 83 F8 FF 74 ??", 0, 0, false },
     { "CSpawnedEntityHandler::LoadResourceSets", "48 89 6C 24 20 41 54 41 55 41 56 48 83 EC 30 48 89 5C 24 50", 0, 0, false },
     { "s_SpawnSystemContext (load of the pointer)", "48 8B 05 ?? ?? ?? ?? 88 88 8B 01 00 00 C3 CC CC", 0, 0, false },
+    { "CPerimeterWarcryerObject::UpdatePostSim", "48 89 5C 24 10 56 48 83 EC 20 80 B9 DA 01 00 00 00 48 8B F2 48 8B D9", 0, 0, false },
+    { "SetBlackboardValue<float>", "48 89 5C 24 08 48 89 74 24 10 F3 0F 11 54 24 18 57 48 83 EC 30", 0, 0, false },
+    { "CPerimeterHandlerSystem::InActivate", "48 89 5C 24 08 33 DB 4C 8B C9 48 85 D2 74 ?? 4C 8B 42 08 4D 85 C0", 0, 0, false },
+    { "CCharacterManager instance (load of the pointer)", "48 8B 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8D 48 08", 0, 0, false },
 };
-enum { SIG_LOAD = 0, SIG_SETENABLE, SIG_ARENAUPDATE, SIG_GETSETID, SIG_LOADSETS, SIG_SPAWNCTX, SIG_COUNT };
+enum { SIG_LOAD = 0, SIG_SETENABLE, SIG_ARENAUPDATE, SIG_GETSETID, SIG_LOADSETS, SIG_SPAWNCTX, SIG_WARCRYER, SIG_SETBBFLOAT, SIG_INACTIVATE,
+       SIG_CHARMGR, SIG_COUNT };
 
 static uintptr_t g_textStart = 0, g_textEnd = 0;
 static unsigned int g_exeTimeStamp = 0;
@@ -212,6 +233,8 @@ static void ArenaUpdate_hook(void* spawner, void* ctx) {
     ArenaUpdate_orig(spawner, ctx);
 }
 
+static void ArenaLevelForget();   // section 4
+
 // ------------------------------------------------- 2. fast-travel point --
 static const uint64_t THUNDERDOME_RESTART_POINT = 0x37601FEEull;   // CRestartPoint in global/global.blo
 typedef void (*SetEnableFn)(void* missionManager, uint64_t id, bool enable);
@@ -222,9 +245,135 @@ static int g_loads = 0;
 
 static void Load_hook(void* mgr, const void* save) {
     Load_orig(mgr, save);
+    ArenaLevelForget();
     SetRestartPointEnable(mgr, THUNDERDOME_RESTART_POINT, true);
     g_loads++;
     LogLine("save loaded: Thunderdome fast-travel point switched on");
+}
+
+// ---------------------------------------------------- 3. War Crier buff --
+// CPerimeterWarcryerObject (GOG build): object id +0x14, SPerimeterLocationData at +0x128 (location index word +0x128, the flag
+// CPerimeterHandlerSystem::Activate requires at +0x12A), active +0x1DA. UpdatePostSim switches the object off for good when its location's
+// main camp mission is completed; the arena's location index (assigned when the container loads) counts as one.
+static const unsigned TD_WARCRYER_ID = 0xBE874485u;   // td_warcryer.object (tools/thunderdome_warcryer.py)
+typedef void (*WarcryerUpdateFn)(void* obj, void* ctx);
+static WarcryerUpdateFn WarcryerUpdate_orig = nullptr;
+static void* g_warcryerSeen = nullptr;
+static int g_warcryerRearms = 0;
+static void ArenaLevelUpdate(uint8_t* warcryer);
+
+static void WarcryerUpdate_hook(void* obj, void* ctx) {
+    __try {
+        uint8_t* b = (uint8_t*)obj;
+        if (*(unsigned*)(b + 0x14) == TD_WARCRYER_ID) {
+            unsigned short loc = *(uint16_t*)(b + 0x128);
+            if (obj != g_warcryerSeen) {
+                g_warcryerSeen = obj;
+                LogLine("arena War Crier %p: location index %04X -> FFFF, active %d -> 1", obj, loc, b[0x1DA]);
+            }
+            *(uint16_t*)(b + 0x128) = 0xFFFF;
+            b[0x1DA] = 1;
+            if (!b[0x12A]) {
+                b[0x12A] = 1;
+                if (++g_warcryerRearms <= 50) LogLine("arena War Crier: re-armed after a deactivation (%d)", g_warcryerRearms);
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    WarcryerUpdate_orig(obj, ctx);
+    if (obj == g_warcryerSeen) ArenaLevelUpdate((uint8_t*)obj);
+}
+
+// ------------------------------------------------ 4. War Crier strength --
+// The player's blackboard is CCharacter +0xD90 (NScriptGameModule::GetTargetBlackboardForObject; CPerimeterHandlerSystem::Update
+// writes the buff there too); writers hold its lock, a thread id stored at *(bb + 0x408). The player character is
+// CCharacterManager::GetPlayerCharacter: *(*(manager + 0x37A8) + 0x20). War Crier: activated +0x1D9, meter / max +0x164 / +0x168,
+// SPerimeterLocationData at +0x128 (what InActivate gets).
+static const unsigned BB_LOC_DIFF = 0xD3FC585Eu;   // HashString("current_location_difficulty")
+static const float ARENA_LEVEL = 10.0f;
+typedef bool (*SetBbFloatFn)(void* bb, unsigned key, float v, int persistence);
+typedef void (*InActivateFn)(void* system, void* data);
+static SetBbFloatFn SetBbFloat_orig = nullptr;
+static InActivateFn InActivate_orig = nullptr;
+static void** g_charManager = nullptr;
+static volatile float g_gameLevel = -1.0f;     // the last level the game wrote (-1: none seen yet)
+static uint8_t* volatile g_raisedFor = nullptr;  // the character whose blackboard holds ARENA_LEVEL, or null
+static volatile DWORD g_ownWrite = 0;           // thread id while this plugin writes the level
+static int g_raises = 0, g_restores = 0, g_levelLines = 0;
+
+static uint8_t* PlayerCharacter() {
+    __try {
+        uint8_t* m = g_charManager ? (uint8_t*)*g_charManager : nullptr;
+        uint8_t* p = m ? *(uint8_t**)(m + 0x37A8) : nullptr;
+        return p ? *(uint8_t**)(p + 0x20) : nullptr;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+
+static bool WriteLevel(uint8_t* ch, float v) {
+    bool ok = false;
+    __try {
+        uint8_t* bb = ch + 0xD90;
+        volatile LONG64* lock = *(volatile LONG64**)(bb + 0x408);
+        LONG64 me = GetCurrentThreadId();
+        bool held = *lock == me;                 // called from inside a write of this blackboard
+        if (!held) while (InterlockedCompareExchange64(lock, me, 0) != 0) SwitchToThread();
+        g_ownWrite = (DWORD)me;
+        ok = SetBbFloat_orig(bb, BB_LOC_DIFF, v, 0);
+        g_ownWrite = 0;
+        if (!held) InterlockedCompareExchange64(lock, 0, me);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { g_ownWrite = 0; }
+    return ok;
+}
+
+static void RestoreLevel(const char* why) {
+    uint8_t* ch = g_raisedFor;
+    if (!ch) return;
+    g_raisedFor = nullptr;
+    if (PlayerCharacter() != ch) {
+        if (++g_levelLines <= 200) LogLine("arena level: %s, the player character changed, nothing to restore", why);
+        return;
+    }
+    bool ok = WriteLevel(ch, g_gameLevel);
+    g_restores++;
+    if (++g_levelLines <= 200) LogLine("arena level: %s, location difficulty back to %.0f (%s)", why, g_gameLevel, ok ? "ok" : "write failed");
+}
+
+static void ArenaLevelUpdate(uint8_t* b) {
+    bool full = false;
+    __try { full = b[0x1D9] && *(float*)(b + 0x164) >= *(float*)(b + 0x168); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    if (!full || g_raisedFor) return;
+    if (g_gameLevel < 0.0f) {
+        if (++g_levelLines <= 200) LogLine("arena level: War Crier full, but the game's location difficulty was not seen yet: not raised");
+        g_raisedFor = (uint8_t*)1;               // once per activation; InActivate clears it
+        return;
+    }
+    uint8_t* ch = PlayerCharacter();
+    if (!ch) return;
+    bool ok = WriteLevel(ch, ARENA_LEVEL);
+    g_raisedFor = ch;
+    g_raises++;
+    if (++g_levelLines <= 200) LogLine("arena level: War Crier full, location difficulty %.0f -> %.0f (%s)", g_gameLevel, ARENA_LEVEL, ok ? "ok" : "write failed");
+}
+
+static bool SetBbFloat_hook(void* bb, unsigned key, float v, int persistence) {
+    if (key == BB_LOC_DIFF && g_ownWrite != GetCurrentThreadId()) {
+        g_gameLevel = v;
+        if (g_raisedFor) {
+            g_raisedFor = nullptr;               // the game's own value wins; the War Crier raises it again on its next update
+            if (++g_levelLines <= 200) LogLine("arena level: the game set location difficulty %.0f, kept", v);
+        }
+    }
+    return SetBbFloat_orig(bb, key, v, persistence);
+}
+
+// A loaded save brings its own blackboard.
+static void ArenaLevelForget() { g_raisedFor = nullptr; }
+
+static void InActivate_hook(void* system, void* data) {
+    InActivate_orig(system, data);
+    if (g_warcryerSeen && data == (uint8_t*)g_warcryerSeen + 0x128) {
+        if (g_raisedFor == (uint8_t*)1) g_raisedFor = nullptr;
+        else RestoreLevel("War Crier off");
+    }
 }
 
 // ------------------------------------------------------------- startup --
@@ -271,11 +420,17 @@ static void InstallMod(bool ok) {
     }
     uintptr_t insn = g_sigs[SIG_SPAWNCTX].resolved;                  // mov rax,[rip+disp32]
     g_spawnContext = (void**)(insn + 7 + *(int32_t*)(insn + 3));
+    insn = g_sigs[SIG_CHARMGR].resolved;                              // mov rcx,[rip+disp32]
+    g_charManager = (void**)(insn + 7 + *(int32_t*)(insn + 3));
     GetResourceSetSpawnTypeId = (GetSetIdFn)g_sigs[SIG_GETSETID].resolved;
     LoadResourceSets = (LoadSetsFn)g_sigs[SIG_LOADSETS].resolved;
     SetRestartPointEnable = (SetEnableFn)g_sigs[SIG_SETENABLE].resolved;
     LogLine("arena hook: %s", InstallHook(g_sigs[SIG_ARENAUPDATE].resolved, (LPVOID)ArenaUpdate_hook, (LPVOID*)&ArenaUpdate_orig));
     LogLine("save-load hook: %s", InstallHook(g_sigs[SIG_LOAD].resolved, (LPVOID)Load_hook, (LPVOID*)&Load_orig));
+    LogLine("war crier hook: %s", InstallHook(g_sigs[SIG_WARCRYER].resolved, (LPVOID)WarcryerUpdate_hook, (LPVOID*)&WarcryerUpdate_orig));
+    LogLine("arena level hooks: SetBlackboardValue<float> %s, InActivate %s",
+        InstallHook(g_sigs[SIG_SETBBFLOAT].resolved, (LPVOID)SetBbFloat_hook, (LPVOID*)&SetBbFloat_orig),
+        InstallHook(g_sigs[SIG_INACTIVATE].resolved, (LPVOID)InActivate_hook, (LPVOID*)&InActivate_orig));
     LogLine("ready");
 }
 
@@ -319,7 +474,8 @@ static DWORD WINAPI WaitForGameCode(LPVOID) {
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
 {
     if (reason == DLL_PROCESS_DETACH) {
-        LogLine("session end: %d save load(s), resources requested %d time(s)", g_loads, g_preloads);
+        LogLine("session end: %d save load(s), resources requested %d time(s), War Crier re-armed %d time(s), arena level raised %d / restored %d time(s)",
+            g_loads, g_preloads, g_warcryerRearms, g_raises, g_restores);
         return TRUE;
     }
     if (reason != DLL_PROCESS_ATTACH) return TRUE;
