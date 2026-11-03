@@ -30,7 +30,9 @@
 //     its maximum, so in the arena the buff only reached 0.7. While the arena War Crier
 //     is active with its meter full, the level is set to 10 (buffed difficulty 1.0); the
 //     game's value goes back when the War Crier switches off (cage empty, or the arena
-//     unloads) and any value the game writes itself is kept (probe test 2026-11-03).
+//     unloads). The game's script writes the level again every ~11 s (test 2026-11-03):
+//     while raised, those writes to the player's blackboard store 10 instead (the game's
+//     value is kept for the restore); a write to another blackboard ends the raise.
 //
 // Depends on MinHook only; every game address is found at startup by byte
 // signature (generated from the GOG 2015-12-07 build by tools/gen_sigs.py).
@@ -44,7 +46,7 @@
 #include <cstdarg>
 #include "MinHook.h"
 
-#define TD_VERSION "0.9.1-wc2"
+#define TD_VERSION "0.9.1-wc3"
 
 // ---------------------------------------------------------------- logging --
 static char g_modDir[MAX_PATH] = "";
@@ -298,7 +300,7 @@ static void** g_charManager = nullptr;
 static volatile float g_gameLevel = -1.0f;     // the last level the game wrote (-1: none seen yet)
 static uint8_t* volatile g_raisedFor = nullptr;  // the character whose blackboard holds ARENA_LEVEL, or null
 static volatile DWORD g_ownWrite = 0;           // thread id while this plugin writes the level
-static int g_raises = 0, g_restores = 0, g_levelLines = 0;
+static int g_raises = 0, g_restores = 0, g_replaced = 0, g_levelLines = 0;
 
 static uint8_t* PlayerCharacter() {
     __try {
@@ -357,9 +359,14 @@ static void ArenaLevelUpdate(uint8_t* b) {
 static bool SetBbFloat_hook(void* bb, unsigned key, float v, int persistence) {
     if (key == BB_LOC_DIFF && g_ownWrite != GetCurrentThreadId()) {
         g_gameLevel = v;
-        if (g_raisedFor) {
-            g_raisedFor = nullptr;               // the game's own value wins; the War Crier raises it again on its next update
-            if (++g_levelLines <= 200) LogLine("arena level: the game set location difficulty %.0f, kept", v);
+        uint8_t* ch = g_raisedFor;
+        if (ch && ch != (uint8_t*)1 && bb == ch + 0xD90) {
+            if (++g_replaced == 1 && ++g_levelLines <= 200)
+                LogLine("arena level: the game wrote location difficulty %.0f, stored %.0f instead (the next ones are counted at session end)", v, ARENA_LEVEL);
+            v = ARENA_LEVEL;
+        } else if (ch) {
+            g_raisedFor = nullptr;               // another blackboard: the game's value wins; the War Crier raises it again on its next update
+            if (++g_levelLines <= 200) LogLine("arena level: the game set location difficulty %.0f on another blackboard, kept", v);
         }
     }
     return SetBbFloat_orig(bb, key, v, persistence);
@@ -474,8 +481,8 @@ static DWORD WINAPI WaitForGameCode(LPVOID) {
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
 {
     if (reason == DLL_PROCESS_DETACH) {
-        LogLine("session end: %d save load(s), resources requested %d time(s), War Crier re-armed %d time(s), arena level raised %d / restored %d time(s)",
-            g_loads, g_preloads, g_warcryerRearms, g_raises, g_restores);
+        LogLine("session end: %d save load(s), resources requested %d time(s), War Crier re-armed %d time(s), arena level raised %d / restored %d time(s), "
+            "game writes replaced %d time(s)", g_loads, g_preloads, g_warcryerRearms, g_raises, g_restores, g_replaced);
         return TRUE;
     }
     if (reason != DLL_PROCESS_ATTACH) return TRUE;
