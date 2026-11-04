@@ -32,6 +32,8 @@ FUNCS = [
     ('CPerimeterWarcryerObject::UpdatePostSim', 0x14047DA40),
     ('SetBlackboardValue<float>', 0x1400E5080),
     ('CPerimeterHandlerSystem::InActivate', 0x140440710),
+    ('CArenaSpawner::GetCharactersInArenaNow', 0x140558A20),
+    ('GameFactionsIsHostile', 0x1406F6B30),
 ]
 GLOBALS = [('s_SpawnSystemContext', 0x14171B678), ('CAvaSingle<CCharacterManager>::Instance', 0x141711B38)]
 

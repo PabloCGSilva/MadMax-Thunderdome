@@ -34,6 +34,10 @@
 //     while raised, those writes of the same level to the player's blackboard store 10
 //     instead. Any other write (another level: fast travel out of the cage; another
 //     blackboard) is kept and ends the raise until the War Crier switches off.
+//  5. Fighters only. The arena counts every living non-player CCharacter inside its shape
+//     trigger as an enemy of the current wave; the guards and civilians standing around the
+//     cage (not hostile to the player) were counted too, so wave 1 never spawned anyone.
+//     Characters that are not hostile to the player are left out of that count.
 //
 // Depends on MinHook only; every game address is found at startup by byte
 // signature (generated from the GOG 2015-12-07 build by tools/gen_sigs.py).
@@ -47,7 +51,7 @@
 #include <cstdarg>
 #include "MinHook.h"
 
-#define TD_VERSION "0.9.1-wc4"
+#define TD_VERSION "0.9.1-fighters1"
 
 // ---------------------------------------------------------------- logging --
 static char g_modDir[MAX_PATH] = "";
@@ -102,9 +106,11 @@ static GameSignature g_sigs[] = {
     { "SetBlackboardValue<float>", "48 89 5C 24 08 48 89 74 24 10 F3 0F 11 54 24 18 57 48 83 EC 30", 0, 0, false },
     { "CPerimeterHandlerSystem::InActivate", "48 89 5C 24 08 33 DB 4C 8B C9 48 85 D2 74 ?? 4C 8B 42 08 4D 85 C0", 0, 0, false },
     { "CCharacterManager instance (load of the pointer)", "48 8B 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8D 48 08", 0, 0, false },
+    { "CArenaSpawner::GetCharactersInArenaNow", "48 8B C4 57 48 83 EC 70 48 C7 44 24 20 FE FF FF FF 48 89 58 08 48 89 68 10 48 89 70 20", 0, 0, false },
+    { "GameFactionsIsHostile", "48 83 EC 28 E8 ?? ?? ?? ?? 83 F8 01 0F 94 C0 48 83 C4 28 C3", 0, 0, false },
 };
 enum { SIG_LOAD = 0, SIG_SETENABLE, SIG_ARENAUPDATE, SIG_GETSETID, SIG_LOADSETS, SIG_SPAWNCTX, SIG_WARCRYER, SIG_SETBBFLOAT, SIG_INACTIVATE,
-       SIG_CHARMGR, SIG_COUNT };
+       SIG_CHARMGR, SIG_INARENANOW, SIG_ISHOSTILE, SIG_COUNT };
 
 static uintptr_t g_textStart = 0, g_textEnd = 0;
 static unsigned int g_exeTimeStamp = 0;
@@ -388,6 +394,54 @@ static void InActivate_hook(void* system, void* data) {
     }
 }
 
+// ------------------------------------------------ 5. fighters only --
+// CArenaSpawner::GetCharactersInArenaNow (only caller: CArenaSpawner::UpdatePostSim) fills a std::vector<CCharacter*> with every
+// living non-player CCharacter among its shape trigger's subjects ("arena_bounds": the cage and the fighters' entry platform), and
+// the wave takes them as its enemies. The NPCs around the cage (Gutgash guards, stronghold civilians: CCharacters of faction 6, Crow
+// Dazzler's) stood in that shape, so wave 1 counted 5 enemies that never die and spawned none (test 2026-11-04 18:38, "inArena 5 |
+// wave#1 spawned 5/8 maxActive 4"). Entries that are not hostile to the player are dropped: GameFactionsIsHostile is the check the
+// War Crier counts with, CCharacter::GetFaction reads +0x4F8, the entries are CCharacter object starts (world position +0x208).
+typedef void (*InArenaNowFn)(void* spawner, void* shape, void* out);
+typedef bool (*IsHostileFn)(int a, int b);
+static InArenaNowFn InArenaNow_orig = nullptr;
+static IsHostileFn FactionsIsHostile = nullptr;
+static int g_dropped = 0, g_dropLines = 0, g_droppedN = 0;
+static void* g_droppedSeen[64];
+static bool g_fighterLogged = false;
+
+static void InArenaNow_hook(void* spawner, void* shape, void* out) {
+    InArenaNow_orig(spawner, shape, out);
+    uint8_t* pl = PlayerCharacter();
+    if (!pl || !out) return;
+    __try {
+        int pf = *(int*)(pl + 0x4F8);
+        uint8_t*** v = (uint8_t***)out;          // begin, end, end of capacity
+        uint8_t** w = v[0];
+        for (uint8_t** r = v[0]; r < v[1]; r++) {
+            uint8_t* c = *r;
+            int f = c ? *(int*)(c + 0x4F8) : 0;
+            if (c && !FactionsIsHostile(pf, f)) {
+                g_dropped++;
+                bool seen = false;
+                for (int i = 0; i < g_droppedN; i++) if (g_droppedSeen[i] == c) { seen = true; break; }
+                if (!seen) {
+                    if (g_droppedN < 64) g_droppedSeen[g_droppedN++] = c;
+                    const float* p = (const float*)(c + 0x208);
+                    if (++g_dropLines <= 60)
+                        LogLine("arena: %p at %.1f %.1f %.1f (faction %d, player %d) is not hostile, not counted as a fighter", c, p[0], p[1], p[2], f, pf);
+                }
+                continue;
+            }
+            if (c && !g_fighterLogged) {
+                g_fighterLogged = true;
+                LogLine("arena: first fighter counted: %p (faction %d, player %d)", c, f, pf);
+            }
+            *w++ = c;
+        }
+        v[1] = w;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
 // ------------------------------------------------------------- startup --
 static const char* InstallHook(uintptr_t target, LPVOID hook, LPVOID* orig) {
     if (!target) return "not found";
@@ -443,6 +497,8 @@ static void InstallMod(bool ok) {
     LogLine("arena level hooks: SetBlackboardValue<float> %s, InActivate %s",
         InstallHook(g_sigs[SIG_SETBBFLOAT].resolved, (LPVOID)SetBbFloat_hook, (LPVOID*)&SetBbFloat_orig),
         InstallHook(g_sigs[SIG_INACTIVATE].resolved, (LPVOID)InActivate_hook, (LPVOID*)&InActivate_orig));
+    FactionsIsHostile = (IsHostileFn)g_sigs[SIG_ISHOSTILE].resolved;
+    LogLine("arena fighters hook: %s", InstallHook(g_sigs[SIG_INARENANOW].resolved, (LPVOID)InArenaNow_hook, (LPVOID*)&InArenaNow_orig));
     LogLine("ready");
 }
 
@@ -487,7 +543,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
 {
     if (reason == DLL_PROCESS_DETACH) {
         LogLine("session end: %d save load(s), resources requested %d time(s), War Crier re-armed %d time(s), arena level raised %d / restored %d time(s), "
-            "game writes replaced %d time(s)", g_loads, g_preloads, g_warcryerRearms, g_raises, g_restores, g_replaced);
+            "game writes replaced %d time(s), non-hostile characters left out of the arena count %d time(s)", g_loads, g_preloads, g_warcryerRearms,
+            g_raises, g_restores, g_replaced, g_dropped);
         return TRUE;
     }
     if (reason != DLL_PROCESS_ATTACH) return TRUE;
