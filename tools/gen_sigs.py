@@ -34,6 +34,8 @@ FUNCS = [
     ('CPerimeterHandlerSystem::InActivate', 0x140440710),
     ('CArenaSpawner::GetCharactersInArenaNow', 0x140558A20),
     ('GameFactionsIsHostile', 0x1406F6B30),
+    ('CSpawnedEntityHandler::IsResourceSetLoadingOrLoaded', 0x1404F6EA0),
+    ('GameLocationSystemLoad', 0x140667BA0),
 ]
 GLOBALS = [('s_SpawnSystemContext', 0x14171B678), ('CAvaSingle<CCharacterManager>::Instance', 0x141711B38)]
 

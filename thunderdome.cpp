@@ -51,7 +51,7 @@
 #include <cstdarg>
 #include "MinHook.h"
 
-#define TD_VERSION "0.9.1-fighters2"
+#define TD_VERSION "0.9.1-fighters3"
 
 // ---------------------------------------------------------------- logging --
 static char g_modDir[MAX_PATH] = "";
@@ -108,9 +108,11 @@ static GameSignature g_sigs[] = {
     { "CCharacterManager instance (load of the pointer)", "48 8B 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8D 48 08", 0, 0, false },
     { "CArenaSpawner::GetCharactersInArenaNow", "48 8B C4 57 48 83 EC 70 48 C7 44 24 20 FE FF FF FF 48 89 58 08 48 89 68 10 48 89 70 20", 0, 0, false },
     { "GameFactionsIsHostile", "48 83 EC 28 E8 ?? ?? ?? ?? 83 F8 01 0F 94 C0 48 83 C4 28 C3", 0, 0, false },
+    { "CSpawnedEntityHandler::IsResourceSetLoadingOrLoaded", "48 89 5C 24 08 57 48 83 EC 20 0F B6 C2 48 8B D9 48 8D 3C 80", 0, 0, false },
+    { "GameLocationSystemLoad", "80 61 67 DF F6 41 67 04 75 ?? 48 83 79 20 00 75 ?? E9 ?? ?? ?? ??", 0, 0, false },
 };
 enum { SIG_LOAD = 0, SIG_SETENABLE, SIG_ARENAUPDATE, SIG_GETSETID, SIG_LOADSETS, SIG_SPAWNCTX, SIG_WARCRYER, SIG_SETBBFLOAT, SIG_INACTIVATE,
-       SIG_CHARMGR, SIG_INARENANOW, SIG_ISHOSTILE, SIG_COUNT };
+       SIG_CHARMGR, SIG_INARENANOW, SIG_ISHOSTILE, SIG_SETLOADED, SIG_LOCLOAD, SIG_COUNT };
 
 static uintptr_t g_textStart = 0, g_textEnd = 0;
 static unsigned int g_exeTimeStamp = 0;
@@ -204,13 +206,26 @@ static const int WANTED = sizeof(g_wanted) / sizeof(g_wanted[0]);
 
 typedef uint8_t (*GetSetIdFn)(void* handler, int type, unsigned spawnTypeHash, unsigned factionHash);
 typedef void (*LoadSetsFn)(void* handler, const uint8_t* ids /* 0xFF-terminated, max 20 */, char priority);
+typedef bool (*SetLoadedFn)(void* handler, uint8_t id);
+typedef void (*LocLoadFn)(void* locationInfo);
 typedef void (*ArenaUpdateFn)(void* spawner, void* ctx);
 static GetSetIdFn GetResourceSetSpawnTypeId = nullptr;
 static LoadSetsFn LoadResourceSets = nullptr;
+static SetLoadedFn IsResourceSetLoadingOrLoaded = nullptr;
+static LocLoadFn GameLocationSystemLoad = nullptr;
 static ArenaUpdateFn ArenaUpdate_orig = nullptr;
 static void** g_spawnContext = nullptr;          // CSpawnedEntityHandler* s_SpawnSystemContext
 static void* g_preloadedFor = nullptr;           // the handler the sets were requested on
 static int g_preloads = 0;
+static int g_setReloads = 0;
+
+// The handler's status of a resource set (CSpawnedEntityHandler::LoadResourceSets 0x140548B20): an array of 0x28-byte
+// entries at +0x1B8, the SLocationInfo* at +8 and the hold count at +0x22. LoadResourceSets only loads the location when
+// the count goes from 0 to 1. A save load unloads the location (GameLocationSystem, not the handler) and leaves the
+// count as it was, so a second LoadResourceSets only raised the count and the set stayed unloaded (test 2026-11-04
+// 20:33: "requested 2 resource set(s)" after the reload, no LOC request, then "spawn waits on sets: 11 -> waiting").
+// A set that is still held but not loaded is loaded again directly, as LoadResourceSets does for its first hold.
+static uint8_t* SetStatus(void* h, uint8_t id) { return (uint8_t*)h + 0x1B8 + id * 0x28; }
 
 static void PreloadSets(void* h) {
     uint8_t ids[21]; int n = 0;
@@ -219,8 +234,32 @@ static void PreloadSets(void* h) {
         __try { id = GetResourceSetSpawnTypeId(h, 0, g_wanted[i].type, g_wanted[i].faction); }
         __except (EXCEPTION_EXECUTE_HANDLER) { id = 0xFF; }
         g_wanted[i].id = id;
-        LogLine("  resource set %-20s -> id %u%s", g_wanted[i].name, id, id == 0xFF ? " (not found, skipped)" : "");
-        if (id != 0xFF && n < 20) ids[n++] = id;
+        if (id == 0xFF) {
+            LogLine("  resource set %-20s -> id %u (not found, skipped)", g_wanted[i].name, id);
+            continue;
+        }
+        int16_t holds = 0; void* info = nullptr; bool present = false; bool reloaded = false;
+        __try {
+            uint8_t* st = SetStatus(h, id);
+            holds = *(int16_t*)(st + 0x22);
+            info = *(void**)(st + 8);
+            if (holds > 0 && info) {
+                present = IsResourceSetLoadingOrLoaded(h, id);
+                if (!present) { GameLocationSystemLoad(info); reloaded = true; }
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) { holds = -1; }
+        if (holds == 0) {
+            LogLine("  resource set %-20s -> id %u", g_wanted[i].name, id);
+            if (n < 20) ids[n++] = id;
+        } else if (holds > 0 && reloaded) {
+            g_setReloads++;
+            LogLine("  resource set %-20s -> id %u, held %d time(s) but unloaded: loaded again", g_wanted[i].name, id, holds);
+        } else if (holds > 0) {
+            LogLine("  resource set %-20s -> id %u, held %d time(s), %s", g_wanted[i].name, id, holds, info ? "loaded or loading" : "no location (skipped)");
+        } else {
+            LogLine("  resource set %-20s -> id %u: its status could not be read (skipped)", g_wanted[i].name, id);
+        }
     }
     ids[n] = 0xFF;
     if (n) {
@@ -493,6 +532,8 @@ static void InstallMod(bool ok) {
     g_charManager = (void**)(insn + 7 + *(int32_t*)(insn + 3));
     GetResourceSetSpawnTypeId = (GetSetIdFn)g_sigs[SIG_GETSETID].resolved;
     LoadResourceSets = (LoadSetsFn)g_sigs[SIG_LOADSETS].resolved;
+    IsResourceSetLoadingOrLoaded = (SetLoadedFn)g_sigs[SIG_SETLOADED].resolved;
+    GameLocationSystemLoad = (LocLoadFn)g_sigs[SIG_LOCLOAD].resolved;
     SetRestartPointEnable = (SetEnableFn)g_sigs[SIG_SETENABLE].resolved;
     LogLine("arena hook: %s", InstallHook(g_sigs[SIG_ARENAUPDATE].resolved, (LPVOID)ArenaUpdate_hook, (LPVOID*)&ArenaUpdate_orig));
     LogLine("save-load hook: %s", InstallHook(g_sigs[SIG_LOAD].resolved, (LPVOID)Load_hook, (LPVOID*)&Load_orig));
@@ -546,8 +587,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
 {
     if (reason == DLL_PROCESS_DETACH) {
         LogLine("session end: %d save load(s), resources requested %d time(s), War Crier re-armed %d time(s), arena level raised %d / restored %d time(s), "
-            "game writes replaced %d time(s), non-hostile characters left out of the arena count %d time(s)", g_loads, g_preloads, g_warcryerRearms,
-            g_raises, g_restores, g_replaced, g_dropped);
+            "game writes replaced %d time(s), non-hostile characters left out of the arena count %d time(s), unloaded held sets loaded again %d time(s)", g_loads, g_preloads, g_warcryerRearms,
+            g_raises, g_restores, g_replaced, g_dropped, g_setReloads);
         return TRUE;
     }
     if (reason != DLL_PROCESS_ATTACH) return TRUE;
