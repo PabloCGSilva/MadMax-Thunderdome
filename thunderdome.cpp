@@ -51,7 +51,7 @@
 #include <cstdarg>
 #include "MinHook.h"
 
-#define TD_VERSION "0.9.1-fighters1"
+#define TD_VERSION "0.9.1-fighters2"
 
 // ---------------------------------------------------------------- logging --
 static char g_modDir[MAX_PATH] = "";
@@ -230,7 +230,9 @@ static void PreloadSets(void* h) {
 }
 
 // The probe this replaces requested the sets once per session; this does it once per spawn handler, in case
-// the game ever rebuilds the handler (a new pointer) within a session.
+// the game ever rebuilds the handler (a new pointer) within a session, and again after every save load: a load
+// (death, reload) unloads the sets but keeps the handler, and wave 2's gimps then waited on them forever (test
+// 2026-11-04: "LOC unload ...roadkills_gimp" at the reload, then "spawn waits on sets: 11 -> waiting").
 static void ArenaUpdate_hook(void* spawner, void* ctx) {
     void* h = g_spawnContext ? *g_spawnContext : nullptr;
     if (h && h != g_preloadedFor) {
@@ -255,6 +257,7 @@ static int g_loads = 0;
 static void Load_hook(void* mgr, const void* save) {
     Load_orig(mgr, save);
     ArenaLevelForget();
+    g_preloadedFor = nullptr;   // the load unloaded the gate enemies' sets: request them again at the next arena update
     SetRestartPointEnable(mgr, THUNDERDOME_RESTART_POINT, true);
     g_loads++;
     LogLine("save loaded: Thunderdome fast-travel point switched on");
