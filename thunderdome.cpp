@@ -47,7 +47,7 @@
 #include <cstdarg>
 #include "MinHook.h"
 
-#define TD_VERSION "0.9.1-sn1"
+#define TD_VERSION "0.9.1-wc4"
 
 // ---------------------------------------------------------------- logging --
 static char g_modDir[MAX_PATH] = "";
@@ -187,14 +187,12 @@ static bool NoSignatureMatched() {
 }
 
 // ------------------------------------------------- 1. resource sets --
-// Spawn type and faction hashes of the sets the gate waves use (Roadkills), and the Scrotus scavenger set: the
-// platform snipers' rifle model ships only with it (a00_re_characters_scrotus_scavanger.bl). Loading more at once
-// (10 sets) froze the game for a moment in testing, so only these three.
+// Spawn type and faction hashes of the sets the gate waves use (Roadkills). Loading more at once (10 sets)
+// froze the game for a moment in testing, so only these two.
 struct WantedSet { const char* name; unsigned type, faction; uint8_t id; };
 static WantedSet g_wanted[] = {
     { "roadkills defender", 1049477367u, 4264560240u, 0xFF },
     { "roadkills gimp", 2970139294u, 4264560240u, 0xFF },
-    { "scrotus scavenger", 962896316u, 3401871079u, 0xFF },
 };
 static const int WANTED = sizeof(g_wanted) / sizeof(g_wanted[0]);
 
