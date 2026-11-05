@@ -51,7 +51,7 @@
 #include <cstdarg>
 #include "MinHook.h"
 
-#define TD_VERSION "0.9.1-fighters3"
+#define TD_VERSION "0.9.1-fighters4"
 
 // ---------------------------------------------------------------- logging --
 static char g_modDir[MAX_PATH] = "";
@@ -110,9 +110,10 @@ static GameSignature g_sigs[] = {
     { "GameFactionsIsHostile", "48 83 EC 28 E8 ?? ?? ?? ?? 83 F8 01 0F 94 C0 48 83 C4 28 C3", 0, 0, false },
     { "CSpawnedEntityHandler::IsResourceSetLoadingOrLoaded", "48 89 5C 24 08 57 48 83 EC 20 0F B6 C2 48 8B D9 48 8D 3C 80", 0, 0, false },
     { "GameLocationSystemLoad", "80 61 67 DF F6 41 67 04 75 ?? 48 83 79 20 00 75 ?? E9 ?? ?? ?? ??", 0, 0, false },
+    { "CResourceLoader::UpdateResourceIfCached", "48 89 6C 24 18 48 89 74 24 20 57 41 54 41 55 48 83 EC 40 48 8B E9 49 8B F1 45 8B E8 49 8B C9 8B FA 41 81 F8 51 B3 AE D6", 0, 0, false },
 };
 enum { SIG_LOAD = 0, SIG_SETENABLE, SIG_ARENAUPDATE, SIG_GETSETID, SIG_LOADSETS, SIG_SPAWNCTX, SIG_WARCRYER, SIG_SETBBFLOAT, SIG_INACTIVATE,
-       SIG_CHARMGR, SIG_INARENANOW, SIG_ISHOSTILE, SIG_SETLOADED, SIG_LOCLOAD, SIG_COUNT };
+       SIG_CHARMGR, SIG_INARENANOW, SIG_ISHOSTILE, SIG_SETLOADED, SIG_LOCLOAD, SIG_UPDATECACHED, SIG_COUNT };
 
 static uintptr_t g_textStart = 0, g_textEnd = 0;
 static unsigned int g_exeTimeStamp = 0;
@@ -484,6 +485,22 @@ static void InArenaNow_hook(void* spawner, void* shape, void* out) {
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
 }
 
+// The arena ships from the dropzone, so its members have revision 1 and the game's archives revision 0, and UpdateResourceIfCached
+// re-creates a cached resource when the revision is higher. For an effect that deletes the SEffectRTSystem a playing instance still uses:
+// the handles already lead to the new entry, so IsGameEffectEntryUsed says the old one is free. At night cold_breath_ai is playing when
+// the arena loads after a fast travel, and the game crashes once that memory is reused (AVAMain+0xF8C5CF, EffectFragments_F). The arena's
+// .effc are the game's own, so an effect already in the cache stays: revision 0 is what the game's archives pass.
+typedef bool (*UpdateCachedFn)(void* loader, unsigned revision, unsigned ext, const char* name, const unsigned char* data, unsigned size);
+static UpdateCachedFn UpdateCached_orig = nullptr;
+static volatile LONG g_effectsKept = 0;
+static bool UpdateCached_hook(void* loader, unsigned revision, unsigned ext, const char* name, const unsigned char* data, unsigned size) {
+    size_t n = revision && name ? strlen(name) : 0;
+    if (n <= 5 || strcmp(name + n - 5, ".effc") != 0) return UpdateCached_orig(loader, revision, ext, name, data, size);
+    bool cached = UpdateCached_orig(loader, 0, ext, name, data, size);
+    if (cached && InterlockedIncrement(&g_effectsKept) <= 20) LogLine("effect already cached, kept: %s (revision %u)", name, revision);
+    return cached;
+}
+
 // ------------------------------------------------------------- startup --
 static const char* InstallHook(uintptr_t target, LPVOID hook, LPVOID* orig) {
     if (!target) return "not found";
@@ -543,6 +560,7 @@ static void InstallMod(bool ok) {
         InstallHook(g_sigs[SIG_INACTIVATE].resolved, (LPVOID)InActivate_hook, (LPVOID*)&InActivate_orig));
     FactionsIsHostile = (IsHostileFn)g_sigs[SIG_ISHOSTILE].resolved;
     LogLine("arena fighters hook: %s", InstallHook(g_sigs[SIG_INARENANOW].resolved, (LPVOID)InArenaNow_hook, (LPVOID*)&InArenaNow_orig));
+    LogLine("effect cache hook: %s", InstallHook(g_sigs[SIG_UPDATECACHED].resolved, (LPVOID)UpdateCached_hook, (LPVOID*)&UpdateCached_orig));
     LogLine("ready");
 }
 
@@ -586,6 +604,7 @@ static DWORD WINAPI WaitForGameCode(LPVOID) {
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
 {
     if (reason == DLL_PROCESS_DETACH) {
+        LogLine("cached effects kept: %ld", (long)g_effectsKept);
         LogLine("session end: %d save load(s), resources requested %d time(s), War Crier re-armed %d time(s), arena level raised %d / restored %d time(s), "
             "game writes replaced %d time(s), non-hostile characters left out of the arena count %d time(s), unloaded held sets loaded again %d time(s)", g_loads, g_preloads, g_warcryerRearms,
             g_raises, g_restores, g_replaced, g_dropped, g_setReloads);

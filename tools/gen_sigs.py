@@ -36,6 +36,7 @@ FUNCS = [
     ('GameFactionsIsHostile', 0x1406F6B30),
     ('CSpawnedEntityHandler::IsResourceSetLoadingOrLoaded', 0x1404F6EA0),
     ('GameLocationSystemLoad', 0x140667BA0),
+    ('CResourceLoader::UpdateResourceIfCached', 0x140716940),
 ]
 GLOBALS = [('s_SpawnSystemContext', 0x14171B678), ('CAvaSingle<CCharacterManager>::Instance', 0x141711B38)]
 
