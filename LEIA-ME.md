@@ -1,4 +1,4 @@
-# Mad Max – Thunderdome (v0.9.0-beta1)
+# Mad Max – Thunderdome (v0.9.1-beta2)
 
 O Mad Max foi lançado com uma arena de luta que o jogador nunca consegue
 alcançar: um domo com jaula na beira do The Big Nothing, com arquibancadas,
@@ -24,6 +24,11 @@ Este repositório tem o código-fonte do plugin.
 * **A Tenderloin** como adversária final. Alguns segundos depois da última
   onda ela entra na jaula. Derrube ela para vencer.
 * **Torcida.** Uns 200 espectadores torcem no domo e nas arquibancadas.
+* **Um acampamento em volta da arena.** Guardas com bestas na plataforma de
+  entrada, trabalhadores, civis e NPCs sentados, além de snipers atirando na
+  jaula.
+* **Um War Crier** que fortalece os inimigos enquanto o medidor está cheio, e
+  **Thunder Sticks** num suporte, também carregados por alguns gimps.
 * No fim da luta você é levado para fora da jaula.
 
 ## Instalação
@@ -39,14 +44,24 @@ pacote colocou no `dropzone`.
 
 ## Por que tem um plugin
 
-Quase tudo são dados do jogo no `dropzone`. O plugin pequeno faz duas coisas
-que os dados não conseguem:
+Quase tudo são dados do jogo no `dropzone`. O plugin pequeno faz o que os
+dados não conseguem:
 
 * Os inimigos que entram pelo portão são dos Roadkills, e o jogo só carrega
   os modelos deles perto do território deles. O plugin carrega esses
   modelos quando a arena começa. Sem ele a luta para na onda 2.
 * O save guarda se cada ponto de viagem rápida está ligado. Depois de
   carregar qualquer save, o plugin liga de novo o ponto do Thunderdome.
+* Carregar um save também descarrega esses modelos de inimigos, então o plugin
+  carrega de novo.
+* Os NPCs da arena contariam como lutadores e impediriam o fim da onda. O
+  plugin tira os personagens não hostis dessa contagem.
+* O War Crier precisa de ajuda para funcionar na arena, que não é um
+  acampamento de verdade.
+* Arquivos na dropzone substituem efeitos que o jogo tem na memória, mesmo com
+  um deles tocando. À noite isso derrubava o jogo na viagem rápida para a
+  arena, por causa do efeito da respiração fria. O plugin mantém o efeito na
+  memória.
 
 ## Requisitos e compatibilidade
 
@@ -71,6 +86,9 @@ que os dados não conseguem:
   originais. Em investigação.
 * Uma tempestade de areia chegando na arena já travou o jogo por alguns
   segundos, e depois ele voltou.
+* Numa tempestade, raios atingiram os NPCs da arena e o jogador foi levado
+  para fora do domo com a Tenderloin ainda viva. Voltar pelo teto permitiu
+  terminar a luta.
 * Não testado ainda: lutar uma segunda vez na mesma sessão, e carregar um
   save feito dentro da arena durante a luta.
 

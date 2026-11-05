@@ -51,7 +51,7 @@
 #include <cstdarg>
 #include "MinHook.h"
 
-#define TD_VERSION "0.9.1-fighters4"
+#define TD_VERSION "0.9.1-beta2"
 
 // ---------------------------------------------------------------- logging --
 static char g_modDir[MAX_PATH] = "";

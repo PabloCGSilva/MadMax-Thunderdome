@@ -1,4 +1,4 @@
-# Mad Max – Thunderdome (v0.9.0-beta1)
+# Mad Max – Thunderdome (v0.9.1-beta2)
 
 Mad Max shipped with a fighting arena that the player can never reach: a
 caged dome on the edge of The Big Nothing, with stands, a gate, a host
@@ -22,6 +22,10 @@ This repository holds the plugin's source.
 * **The Tenderloin** as the final opponent. A few seconds after the last
   wave she drops into the cage. Bring her down to win.
 * **A crowd.** About 200 spectators cheer on the dome and in the stands.
+* **A camp around the arena.** Guards with crossbows on the entry platform,
+  workers, civilians and seated NPCs, plus snipers firing into the cage.
+* **A War Crier** that buffs the enemies while its meter is full, and
+  **Thunder Sticks** on a rack, also carried by some gimps.
 * When the fight is over you are taken back outside the cage.
 
 ## Installation
@@ -37,14 +41,21 @@ added under `dropzone`.
 
 ## Why there is a plugin
 
-Almost everything is game data in the `dropzone`. The small plugin does two
-things data can't:
+Almost everything is game data in the `dropzone`. The small plugin does what
+data can't:
 
 * The enemies that come in through the gate belong to the Roadkills, and the
   game only loads their models near their own territory. The plugin loads
   them when the arena starts. Without it the fight stops at wave 2.
 * Saves remember whether each fast-travel point is on. After every save load
   the plugin switches the Thunderdome point back on.
+* A save load also unloads those enemy models, so the plugin loads them again.
+* Arena NPCs would count as fighters and keep a wave from ending. The plugin
+  leaves non-hostile characters out of that count.
+* The War Crier needs help to work in the arena, which isn't a real camp.
+* Files in the dropzone replace effects the game has in memory, even while one
+  is playing. At night that crashed the game on fast travel to the arena,
+  because of the cold breath effect. The plugin keeps the effect in memory.
 
 ## Requirements and compatibility
 
@@ -67,6 +78,9 @@ things data can't:
   you, probably where the original spawn markers were. Under investigation.
 * A sandstorm reaching the arena once froze the game for a few seconds
   before it recovered.
+* During a storm, lightning hit the arena NPCs and the player was once taken
+  outside the dome with the Tenderloin still alive. Going back in through the
+  roof let the fight finish.
 * Untested: fighting a second time in the same session, and loading a save
   made inside the arena during a fight.
 
