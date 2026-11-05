@@ -26,7 +26,8 @@ This repository holds the plugin's source.
   workers, civilians and seated NPCs, plus snipers firing into the cage.
 * **A War Crier** that buffs the enemies while its meter is full, and
   **Thunder Sticks** on a rack, also carried by some gimps.
-* When the fight is over you are taken back outside the cage.
+* **To start the fight,** talk to Crow Dazzle. You are taken inside the cage,
+  where the waves begin. When it is over you are taken back outside.
 
 ## Installation
 

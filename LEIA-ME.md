@@ -29,7 +29,8 @@ Este repositório tem o código-fonte do plugin.
   jaula.
 * **Um War Crier** que fortalece os inimigos enquanto o medidor está cheio, e
   **Thunder Sticks** num suporte, também carregados por alguns gimps.
-* No fim da luta você é levado para fora da jaula.
+* **Para começar a luta,** fale com Crow Dazzle. Você é levado para dentro da
+  jaula, onde as ondas começam. No fim da luta você é levado para fora.
 
 ## Instalação
 
